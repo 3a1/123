@@ -1,17 +1,19 @@
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartPanel;
 import org.jfree.chart.JFreeChart;
-import org.jfree.chart.axis.NumberAxis;
-import org.jfree.chart.plot.CombinedDomainXYPlot;
-import org.jfree.chart.plot.XYPlot;
 import org.jfree.data.time.Second;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
+
 import javax.swing.*;
 import java.awt.*;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.util.Objects;
 
 import org.json.JSONArray;
@@ -20,16 +22,17 @@ import org.json.JSONObject;
 public class Chart extends JFrame
 {
     private ChartPanel chartPanel;
-
     private final TimeSeries priceSeries = new TimeSeries("Price (USD)");
     private final JComboBox<String> currencyCombo = new JComboBox<>(new String[]{"BTC", "ETH", "XRP"});
     private final JComboBox<Integer> periodCombo = new JComboBox<>(new Integer[]{1, 7, 30});
     private final JLabel indicatorsLabel = new JLabel("Loading indicators...");
+    private Connection databaseConnection;
 
     public Chart(String title)
     {
         super(title);
         setupUI();
+        initializeDatabase();
     }
 
     private void setupUI()
@@ -77,36 +80,10 @@ public class Chart extends JFrame
                 int days = (Integer) periodCombo.getSelectedItem();
 
                 JSONArray prices = fetchData(currency, days);
+                saveDataToDatabase(currency, prices); // Save data to the database
                 updateChart(prices);
 
-                double rsi = Indicators.calculateRSI(prices);
-                double ma = Indicators.calculateMA(prices);
-                double ema = Indicators.calculateEMA(prices, days);
-                double[] macd = Indicators.calculateMACD(prices);
-                double atr = Indicators.calculateATR(prices);
-                double stochastic = Indicators.calculateStochasticOscillator(prices);
-                double roc = Indicators.calculateROC(prices);
-                double obv = Indicators.calculateOBV(prices);
-
-                SwingUtilities.invokeLater(() -> {
-                    indicatorsLabel.setText(String.format(
-                            "<html>" +
-                                    "<div style='font-family: Arial, sans-serif; font-size: 14px;'>" +
-                                    "<strong>RSI:</strong> %.2f<br>" +
-                                    "MA: %.2f | EMA: %.2f<br>" +
-                                    "<strong>MACD:</strong> %.2f (Signal: %.2f)<br>" +
-                                    "<strong>ATR:</strong> %.2f<br>" +
-                                    "<strong>Stochastic Oscillator:</strong> %.2f<br>" +
-                                    "<strong>ROC:</strong> %.2f<br>" +
-                                    "<strong>OBV:</strong> %.2f" +
-                                    "</div>" +
-                                    "</html>",
-                            rsi, ma, ema, macd[0], macd[1], atr,
-                            stochastic, roc, obv));
-                });
-
-                System.out.println("API Response");
-
+                System.out.println("Data saved to the database.");
                 return null;
             }
         }.execute();
@@ -116,8 +93,7 @@ public class Chart extends JFrame
     {
         SwingUtilities.invokeLater(() -> {
             priceSeries.clear();
-            for (int i = 0; i < prices.length(); i++)
-            {
+            for (int i = 0; i < prices.length(); i++) {
                 JSONArray point = prices.getJSONArray(i);
                 Second second = new Second(new java.util.Date(point.getLong(0)));
                 priceSeries.addOrUpdate(second, point.getDouble(1));
@@ -126,17 +102,15 @@ public class Chart extends JFrame
         });
     }
 
-    private JSONArray fetchData(String currency, int days) throws Exception
+    private JSONArray fetchData(String currency, int days) throws Exception 
     {
-        if(Objects.equals(currency, "btc"))
+        if (Objects.equals(currency, "btc"))
         {
             currency = "bitcoin";
-        }
-        else if(Objects.equals(currency, "eth"))
+        } else if (Objects.equals(currency, "eth")) 
         {
             currency = "ethereum";
-        }
-        else if(Objects.equals(currency, "xrp"))
+        } else if (Objects.equals(currency, "xrp"))
         {
             currency = "ripple";
         }
@@ -145,11 +119,11 @@ public class Chart extends JFrame
                 "/market_chart?vs_currency=usd&days=" + days);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 
-        try (InputStreamReader reader = new InputStreamReader(conn.getInputStream()))
+        try (InputStreamReader reader = new InputStreamReader(conn.getInputStream())) 
         {
             StringBuilder response = new StringBuilder();
             int data;
-            while ((data = reader.read()) != -1)
+            while ((data = reader.read()) != -1) 
             {
                 response.append((char) data);
             }
@@ -157,9 +131,56 @@ public class Chart extends JFrame
         }
     }
 
-    public static void main(String[] args)
+    private void initializeDatabase() {
+        try 
+        {
+            databaseConnection = DriverManager.getConnection("jdbc:sqlite:prices.db");
+
+            try (Statement stmt = databaseConnection.createStatement()) 
+            {
+                String createTableQuery = "CREATE TABLE IF NOT EXISTS prices (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                        "currency TEXT NOT NULL, " +
+                        "timestamp INTEGER NOT NULL, " +
+                        "price REAL NOT NULL)";
+                stmt.execute(createTableQuery);
+            }
+        } catch (Exception e) 
+        {
+            e.printStackTrace();
+            JOptionPane.showMessageDialog(this, "Database initialization failed: " + e.getMessage(),
+                    "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void saveDataToDatabase(String currency, JSONArray prices) 
     {
-        SwingUtilities.invokeLater(() -> {
+        String insertQuery = "INSERT INTO prices (currency, timestamp, price) VALUES (?, ?, ?)";
+
+        try (PreparedStatement pstmt = databaseConnection.prepareStatement(insertQuery)) 
+        {
+            for (int i = 0; i < prices.length(); i++) {
+                JSONArray point = prices.getJSONArray(i);
+                long timestamp = point.getLong(0);
+                double price = point.getDouble(1);
+
+                pstmt.setString(1, currency);
+                pstmt.setLong(2, timestamp);
+                pstmt.setDouble(3, price);
+                pstmt.addBatch();
+            }
+            pstmt.executeBatch();
+        } catch (Exception e) {
+            e.printStackTrace();
+            JOptionPane.showMessageDialog(this, "Failed to save data: " + e.getMessage(),
+                    "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    public static void main(String[] args) 
+    {
+        SwingUtilities.invokeLater(() -> 
+        {
             Chart chart = new Chart("Cryptocurrency Price Tracker");
             chart.setVisible(true);
         });
